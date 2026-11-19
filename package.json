@@ -1,0 +1,10 @@
+{
+  "name": "aram-game",
+  "private": true,
+  "version": "1.0.0",
+  "description": "双人本地对战的大乱斗简化版（WebGL/Three.js），零构建，双击 index.html 即可运行。",
+  "type": "module",
+  "scripts": {
+    "dev": "npx serve ."
+  }
+}

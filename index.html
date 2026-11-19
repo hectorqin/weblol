@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ARAM Duel · 双人大乱斗</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #app { width: 100%; height: 100%; overflow: hidden; background: #0b1020; }
+canvas { display: block; }
+
+#hud {
+  position: absolute; inset: 0; pointer-events: none;
+  font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.8);
+}
+#hud .top {
+  position: absolute; top: 16px; left: 0; right: 0;
+  display: flex; justify-content: space-between; align-items: flex-start;
+  padding: 0 28px;
+}
+#hud .side { min-width: 200px; }
+#hud .side.right { text-align: right; }
+#hud .hero { font-size: 20px; font-weight: 700; letter-spacing: 1px; }
+#hud .bar {
+  margin-top: 8px; height: 14px; border-radius: 8px;
+  background: rgba(255,255,255,.15); overflow: hidden; border: 1px solid rgba(255,255,255,.3);
+}
+#hud .bar > i {
+  display: block; height: 100%; width: 100%;
+  background: linear-gradient(90deg,#43ea7a,#18c454); transition: width .15s;
+}
+#hud .side.right .bar > i { background: linear-gradient(90deg,#ff8a65,#f44336); }
+#hud .info { margin-top: 6px; font-size: 14px; opacity: .9; }
+#hud .center { text-align: center; font-size: 15px; opacity: .85; }
+#hud .crystal { font-size: 13px; margin-top: 4px; }
+#hud .cooldowns { margin-top: 8px; font-size: 12px; opacity: .8; line-height: 1.6; }
+#hud .cd-flash { color: #ffd54f; }
+
+#hud .result {
+  position: absolute; top: 36%; left: 0; right: 0; text-align: center;
+}
+#hud .result .title { font-size: 56px; font-weight: 800; letter-spacing: 4px; }
+#hud .result .sub { margin-top: 12px; font-size: 18px; opacity: .9; }
+
+#tip {
+  position: absolute; bottom: 16px; left: 28px;
+  font: 12px/1.7 'Microsoft YaHei', sans-serif; color: rgba(255,255,255,.5);
+}
+
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hud"></div>
+  <div id="tip">
+    <b>P1</b>：WASD 移动 / 鼠标左键普攻 / Q·E 技能 / 空格闪现 / F 雪球 / R 重随<br>
+    <b>P2</b>：方向键移动 / 小键盘 5 普攻 / 1·2 技能 / 0 闪现 / . 雪球 / 3 重随<br>
+    先击杀 5 次或先拆掉对方水晶即获胜。
+  </div>
+</div>
+<script>
+window.__M = {};
+window.__three__ = import("https://unpkg.com/three@0.160.0/build/three.module.js");
+</script>
+
+<script>
+__M["math2d"] = (() => {
+// 2D 数学工具：碰撞判定一律用距离平方，避免开根号
+const dist2 = (ax, az, bx, bz) => {
+  const dx = ax - bx, dz = az - bz;
+  return dx * dx + dz * dz;
+};
+
+const circleHit = (a, b, ra, rb) => {
+  const r = ra + rb;
+  return dist2(a.x, a.z, b.x, b.z) <= r * r;
+};
+
+const clampToBridge = (p, halfW, halfL) => {
+  p.x = Math.max(-halfW, Math.min(halfW, p.x));
+  p.z = Math.max(-halfL, Math.min(halfL, p.z));
+};
+
+return { dist2, circleHit, clampToBridge };
+})();
+</script>
+
+<script>
+__M["heroes"] = (() => {
+// 英雄数值表：加英雄只改这里，逻辑层不用动
+const HEROES = [
+  {
+    id: 'marksman', name: '游侠',
+    color: 0x4fc3f7, hp: 100, speed: 6.2,
+    auto: { cd: 0.42, dmg: 8, speed: 24, radius: 0.25 },
+    skills: {
+      Q: { name: '穿刺箭', cd: 4, dmg: 18, speed: 28, radius: 0.3, type: 'projectile' },
+      E: { name: '翻滚',   cd: 8, dash: 5 },
+    },
+  },
+  {
+    id: 'mage', name: '术士',
+    color: 0xba68c8, hp: 88, speed: 5.2,
+    auto: { cd: 0.7, dmg: 6, speed: 16, radius: 0.3 },
+    skills: {
+      Q: { name: '火球', cd: 3.5, dmg: 24, speed: 14, radius: 0.5, type: 'projectile' },
+      E: { name: '冰封', cd: 11, slow: 0.5, duration: 2, type: 'zone' },
+    },
+  },
+  {
+    id: 'tank', name: '铁卫',
+    color: 0xffb74d, hp: 165, speed: 4.6,
+    auto: { cd: 0.8, dmg: 7, speed: 12, radius: 0.4 },
+    skills: {
+      Q: { name: '冲锋', cd: 7, dash: 8, dmg: 16, type: 'dash' },
+      E: { name: '怒吼', cd: 12, radius: 4, dmg: 10, slow: 0.3, duration: 1.5, type: 'aoe' },
+    },
+  },
+  {
+    id: 'assassin', name: '影刃',
+    color: 0xef5350, hp: 78, speed: 6.8,
+    auto: { cd: 0.5, dmg: 9, speed: 20, radius: 0.25 },
+    skills: {
+      Q: { name: '飞镖', cd: 3, dmg: 15, speed: 30, radius: 0.28, type: 'projectile' },
+      E: { name: '瞬步', cd: 6, dash: 7, dmg: 12, type: 'dash' },
+    },
+  },
+];
+
+// 大乱斗标配：闪现 + 雪球
+const SUMMONER = {
+  flash:    { cd: 12, dash: 4 },
+  snowball: { cd: 18, dmg: 12, speed: 20, radius: 0.4, slow: 0.45, duration: 1.5 },
+};
+
+function randomHero() {
+  return HEROES[Math.floor(Math.random() * HEROES.length)];
+}
+
+return { HEROES, SUMMONER, randomHero };
+})();
+</script>
+
+<script>
+__M["entities"] = (() => {
+const THREE = window.__three__;
+
+// 全局子弹池
+const bullets = [];
+const crystals = { blue: 300, red: 300 };
+
+function createPlayer(hero, side, scene) {
+  const mesh = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.4, 0.8, 4, 8),
+    new THREE.MeshLambertMaterial({ color: hero.color })
+  );
+  mesh.position.set(0, 0.8, side * 16);
+  scene.add(mesh);
+
+  return {
+    hero, side, mesh, scene,
+    x: 0, z: side * 16,
+    facing: side > 0 ? Math.PI : 0,
+    hp: hero.hp, maxHp: hero.hp,
+    alive: true, respawn: 0,
+    autoCd: 0,
+    cd: { Q: 0, E: 0, flash: 0, snowball: 0 },
+    slowUntil: 0, slowFactor: 1,
+    kills: 0, rerolled: false,
+  };
+}
+
+function spawnBullet(owner, cfg, dirX, dirZ) {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(cfg.radius, 8, 8),
+    new THREE.MeshBasicMaterial({ color: owner.hero.color })
+  );
+  mesh.position.set(owner.x, 0.8, owner.z);
+  owner.scene.add(mesh);
+  bullets.push({
+    mesh, owner, x: owner.x, z: owner.z,
+    vx: dirX * cfg.speed, vz: dirZ * cfg.speed,
+    radius: cfg.radius,
+    dmg: cfg.dmg,
+    life: 3, slow: cfg.slow, slowDuration: cfg.duration,
+  });
+}
+
+return { bullets, crystals, createPlayer, spawnBullet };
+})();
+</script>
+
+<script>
+__M["input"] = (() => {
+// 输入层：统一键盘 + 鼠标状态，逻辑层每帧来读，不在事件里改状态
+const keys = Object.create(null);
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+const mouse = { x: 0, y: 0, down: false };
+addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+addEventListener('mousedown', e => { if (e.button === 0) mouse.down = true; });
+addEventListener('mouseup',   e => { if (e.button === 0) mouse.down = false; });
+
+const SCHEMES = {
+  p1: { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD',
+        q: 'KeyQ', e: 'KeyE', flash: 'Space', snowball: 'KeyF', reroll: 'KeyR' },
+  p2: { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
+        auto: 'Numpad5', q: 'Numpad1', e: 'Numpad2', flash: 'Numpad0', snowball: 'NumpadDecimal', reroll: 'Numpad3' },
+};
+
+const isDown = code => !!keys[code];
+
+return { mouse, SCHEMES, isDown };
+})();
+</script>
+
+<script>
+__M["combat"] = (() => {
+const THREE = window.__three__;
+
+const HALF_W = 4;
+const HALF_L = 20;
+
+function updatePlayer(p, scheme, dt, now, opponent) {
+  if (!p.alive) {
+    p.respawn -= dt;
+    if (p.respawn <= 0) revive(p);
+    return;
+  }
+
+  // —— 移动 ——
+  let ix = 0, iz = 0;
+  if (isDown(scheme.left))  ix -= 1;
+  if (isDown(scheme.right)) ix += 1;
+  if (isDown(scheme.up))    iz -= 1;
+  if (isDown(scheme.down))  iz += 1;
+  const len = Math.hypot(ix, iz) || 1;
+  const slow = now < p.slowUntil ? p.slowFactor : 1;
+  p.x += (ix / len) * p.hero.speed * slow * dt;
+  p.z += (iz / len) * p.hero.speed * slow * dt;
+  clampToBridge(p, HALF_W, HALF_L);
+
+  // —— 朝向对手 ——
+  p.facing = Math.atan2(opponent.x - p.x, opponent.z - p.z);
+  const dx = Math.sin(p.facing), dz = Math.cos(p.facing);
+
+  // —— 普攻 ——
+  p.autoCd -= dt;
+  const wantAuto = p.side === -1 ? mouse.down : isDown(scheme.auto);
+  if (wantAuto && p.autoCd <= 0) {
+    spawnBullet(p, p.hero.auto, dx, dz);
+    p.autoCd = p.hero.auto.cd;
+  }
+
+  // —— 技能 ——
+  for (const key of ['Q', 'E']) {
+    p.cd[key] = Math.max(0, p.cd[key] - dt);
+    if (isDown(scheme[key.toLowerCase()]) && p.cd[key] <= 0) {
+      castSkill(p, p.hero.skills[key], dx, dz, opponent);
+      p.cd[key] = p.hero.skills[key].cd;
+    }
+  }
+
+  // —— 召唤师技能 ——
+  p.cd.flash = Math.max(0, p.cd.flash - dt);
+  p.cd.snowball = Math.max(0, p.cd.snowball - dt);
+  if (isDown(scheme.flash) && p.cd.flash <= 0) {
+    p.x += dx * SUMMONER.flash.dash;
+    p.z += dz * SUMMONER.flash.dash;
+    clampToBridge(p, HALF_W, HALF_L);
+    p.cd.flash = SUMMONER.flash.cd;
+  }
+  if (isDown(scheme.snowball) && p.cd.snowball <= 0) {
+    spawnBullet(p, SUMMONER.snowball, dx, dz);
+    p.cd.snowball = SUMMONER.snowball.cd;
+  }
+
+  p.mesh.position.set(p.x, 0.8, p.z);
+  p.mesh.rotation.y = p.facing;
+}
+
+function castSkill(p, sk, dx, dz, target) {
+  switch (sk.type) {
+    case 'projectile':
+      spawnBullet(p, sk, dx, dz); break;
+    case 'dash': {
+      p.x += dx * sk.dash; p.z += dz * sk.dash;
+      clampToBridge(p, HALF_W, HALF_L);
+      if (circleHit(p, target, 0.6, 0.4)) damage(target, sk.dmg, p);
+      break;
+    }
+    case 'aoe': {
+      if (dist2(p.x, p.z, target.x, target.z) <= sk.radius * sk.radius) {
+        damage(target, sk.dmg, p);
+        applySlow(target, sk);
+      }
+      break;
+    }
+    case 'zone': {
+      applySlow(target, sk);
+      break;
+    }
+  }
+}
+
+function applySlow(t, sk) {
+  if (!sk.slow) return;
+  t.slowUntil = performance.now() / 1000 + sk.duration;
+  t.slowFactor = Math.max(t.slowFactor, 1 - sk.slow);
+}
+
+function damage(t, amount, from) {
+  if (!t.alive || amount <= 0) return;
+  t.hp -= amount;
+  if (t.hp <= 0) {
+    t.alive = false; t.respawn = 3; t.hp = 0;
+    if (from && from.kills !== undefined) from.kills += 1;
+    t.mesh.visible = false;
+  }
+}
+
+function revive(p) {
+  p.alive = true; p.hp = p.maxHp;
+  p.slowUntil = 0; p.slowFactor = 1;
+  p.x = 0; p.z = p.side * 16;
+  p.mesh.visible = true;
+  p.mesh.position.set(p.x, 0.8, p.z);
+}
+
+function updateBullets(dt, players) {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx * dt; b.z += b.vz * dt;
+    b.life -= dt;
+    b.mesh.position.set(b.x, 0.8, b.z);
+
+    let dead = b.life <= 0 ||
+      Math.abs(b.x) > HALF_W + 1 || Math.abs(b.z) > HALF_L + 1;
+
+    if (!dead) {
+      for (const p of players) {
+        if (p === b.owner || !p.alive) continue;
+        if (circleHit(b, p, b.radius, 0.4)) {
+          damage(p, b.dmg, b.owner);
+          if (b.slow) {
+            p.slowUntil = performance.now() / 1000 + b.slowDuration;
+            p.slowFactor = Math.max(p.slowFactor, 1 - b.slow);
+          }
+          dead = true; break;
+        }
+      }
+    }
+
+    if (!dead) {
+      // 水晶判定
+      const enemyBase = b.owner.side > 0 ? -HALF_L : HALF_L;
+      if (Math.abs(b.z - enemyBase) < 1.2 && Math.abs(b.x) < 1.5) {
+        const key = b.owner.side > 0 ? 'blue' : 'red';
+        crystals[key] = Math.max(0, crystals[key] - b.dmg);
+        dead = true;
+      }
+    }
+
+    if (dead) {
+      b.mesh.parent && b.mesh.parent.remove(b.mesh);
+      b.mesh.geometry.dispose(); b.mesh.material.dispose();
+      bullets.splice(i, 1);
+    }
+  }
+}
+
+return { HALF_W, HALF_L, updatePlayer, damage, updateBullets };
+})();
+</script>
+
+<script>
+__M["scene"] = (() => {
+const THREE = window.__three__;
+
+function buildScene() {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b1020);
+  scene.fog = new THREE.Fog(0x0b1020, 24, 70);
+
+  const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 200);
+  camera.position.set(0, 26, 0.01);
+  camera.lookAt(0, 0, 0);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  document.body.appendChild(renderer.domElement);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+  sun.position.set(10, 20, 10);
+  scene.add(sun);
+
+  // 桥面
+  const bridge = new THREE.Mesh(
+    new THREE.PlaneGeometry(8, 40),
+    new THREE.MeshLambertMaterial({ color: 0x26304a })
+  );
+  bridge.rotation.x = -Math.PI / 2;
+  scene.add(bridge);
+
+  // 桥两侧装饰
+  const edgeMat = new THREE.MeshLambertMaterial({ color: 0x1a2238 });
+  for (const sx of [-1, 1]) {
+    const e = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.6, 40), edgeMat);
+    e.position.set(sx * 4.2, 0.3, 0);
+    scene.add(e);
+  }
+
+  const mkCrystal = (z, c) => {
+    const m = new THREE.Mesh(
+      new THREE.OctahedronGeometry(1.2),
+      new THREE.MeshLambertMaterial({ color: c, emissive: c, emissiveIntensity: 0.4 })
+    );
+    m.position.set(0, 1.4, z);
+    scene.add(m);
+    const base = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.2, 1.4, 0.4, 12),
+      new THREE.MeshLambertMaterial({ color: 0x333b55 })
+    );
+    base.position.set(0, 0.2, z);
+    scene.add(base);
+    return m;
+  };
+  const crystalBlue = mkCrystal(-20, 0x64b5f6);
+  const crystalRed  = mkCrystal( 20, 0xef5350);
+
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+  return { scene, camera, renderer, crystalBlue, crystalRed };
+}
+
+return { buildScene };
+})();
+</script>
+
+<script>
+__M["hud"] = (() => {
+
+function bar(w) {
+  return `<div class="bar"><i style="width:${Math.max(0, Math.min(100, w))}%"></i></div>`;
+}
+
+function cd(p, key, label) {
+  const v = p.cd[key];
+  const cls = v > 0 ? 'cd-flash' : '';
+  return `<div class="${cls}">${label}: ${v > 0 ? v.toFixed(1) + 's' : '就绪'}</div>`;
+}
+
+function drawHud(p1, p2, state) {
+  const el = document.getElementById('hud');
+  const hp1 = (p1.hp / p1.maxHp) * 100;
+  const hp2 = (p2.hp / p2.maxHp) * 100;
+
+  let result = '';
+  if (state.phase === 'over') {
+    result = `<div class="result">
+      <div class="title">${state.winner}</div>
+      <div class="sub">按 Enter 再来一局</div>
+    </div>`;
+  }
+
+  el.innerHTML = `
+    <div class="top">
+      <div class="side">
+        <div class="hero" style="color:#64b5f6">${p1.hero.name}（P1）</div>
+        ${bar(hp1)}
+        <div class="info">击杀 ${p1.kills}${p1.alive ? '' : '　复活 ' + p1.respawn.toFixed(1) + 's'}</div>
+        <div class="cooldowns">
+          ${cd(p1, 'Q', p1.hero.skills.Q.name)}
+          ${cd(p1, 'E', p1.hero.skills.E.name)}
+          ${cd(p1, 'flash', '闪现')}${cd(p1, 'snowball', '雪球')}
+        </div>
+      </div>
+      <div class="center">
+        <div>水晶</div>
+        <div class="crystal" style="color:#90caf9">蓝方 ${crystals.blue}</div>
+        <div class="crystal" style="color:#ef9a9a">红方 ${crystals.red}</div>
+      </div>
+      <div class="side right">
+        <div class="hero" style="color:#ef5350">${p2.hero.name}（P2）</div>
+        ${bar(hp2)}
+        <div class="info">击杀 ${p2.kills}${p2.alive ? '' : '　复活 ' + p2.respawn.toFixed(1) + 's'}</div>
+        <div class="cooldowns">
+          ${cd(p2, 'Q', p2.hero.skills.Q.name)}
+          ${cd(p2, 'E', p2.hero.skills.E.name)}
+          ${cd(p2, 'flash', '闪现')}${cd(p2, 'snowball', '雪球')}
+        </div>
+      </div>
+    </div>
+    ${result}
+  `;
+}
+
+function checkWin(p1, p2) {
+  if (crystals.blue <= 0) return p2.hero.name;
+  if (crystals.red <= 0)  return p1.hero.name;
+  if (p1.kills >= 5) return p1.hero.name;
+  if (p2.kills >= 5) return p2.hero.name;
+  return null;
+}
+
+return { drawHud, checkWin };
+})();
+</script>
+
+<script>
+window.__three__.then(THREE => {
+
+const { scene, renderer } = buildScene();
+
+let p1, p2, state;
+
+function disposePlayer(p) {
+  if (!p || !p.mesh) return;
+  if (p.mesh.parent) p.mesh.parent.remove(p.mesh);
+  p.mesh.geometry.dispose(); p.mesh.material.dispose();
+}
+
+function newRound() {
+  disposePlayer(p1); disposePlayer(p2);
+  crystals.blue = 300; crystals.red = 300;
+
+  p1 = createPlayer(randomHero(), -1, scene);
+  p2 = createPlayer(randomHero(),  1, scene);
+
+  state = { phase: 'playing', winner: null };
+}
+
+function reroll(p, other) {
+  if (p.rerolled) return;
+  let next;
+  for (let i = 0; i < 6; i++) {
+    next = randomHero();
+    if (next.id !== other.hero.id) break;
+  }
+  p.hero = next;
+  p.mesh.material.color.setHex(next.color);
+  p.maxHp = next.hp; p.hp = next.hp;
+  p.autoCd = 0;
+  p.cd = { Q: 0, E: 0, flash: 0, snowball: 0 };
+  p.slowUntil = 0; p.slowFactor = 1;
+  p.rerolled = true;
+}
+
+newRound();
+
+addEventListener('keydown', e => {
+  if (state.phase === 'over' && e.code === 'Enter') newRound();
+  if (e.code === SCHEMES.p1.reroll && p1 && p2) reroll(p1, p2);
+  if (e.code === SCHEMES.p2.reroll && p1 && p2) reroll(p2, p1);
+});
+
+const clock = new THREE.Clock();
+
+function loop() {
+  requestAnimationFrame(loop);
+  const dt = Math.min(clock.getDelta(), 0.05); // 卡帧保护
+  const now = performance.now() / 1000;
+
+  if (state.phase === 'playing') {
+    updatePlayer(p1, SCHEMES.p1, dt, now, p2);
+    updatePlayer(p2, SCHEMES.p2, dt, now, p1);
+    updateBullets(dt, [p1, p2]);
+
+    const w = checkWin(p1, p2);
+    if (w) { state.phase = 'over'; state.winner = w; }
+  }
+
+  drawHud(p1, p2, state);
+  renderer.render(scene, camera);
+}
+loop();
+
+});
+</script>
+
+</body>
+</html>
